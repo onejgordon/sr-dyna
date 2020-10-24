@@ -125,3 +125,5 @@ dmypy.json
 .pyre/
 
 TODO.md
+.DS_Store
+
