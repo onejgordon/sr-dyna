@@ -68,11 +68,12 @@ class SimpleGridWorld():
         # TODO: Efficiency
         cells = self.count_cells()
         is_reward_state = s in range(cells, cells+self.max_reward_locs)
+        reward = 0
         if is_reward_state:
             for loc, ro in self.reward_locs.items():
                 if ro.get('s') == s:
-                    return ro.get('reward')
-        return 0
+                    reward = ro.get('reward')
+        return is_reward_state, reward
 
     def reward_loc(self, loc):
         return loc in self.reward_locs.keys()
@@ -104,8 +105,8 @@ class SimpleGridWorld():
         done = False
         reward = 0
         loc = self.loc_at_state(s)
-        reward = self.reward_state(s)
-        if reward:
+        is_reward, reward = self.reward_state(s)
+        if is_reward:
             next_s = self.terminal_state
             done = True
         else:
@@ -254,7 +255,7 @@ class SRDyna():
         return np.random.choice(np.flatnonzero(vals == vals.max()))
 
     def eps_greedy_policy(self, s, verbose=False):
-        if self.env.reward_state(s) or s == self.env.terminal_state:
+        if self.env.reward_state(s)[0] or s == self.env.terminal_state:
             return 0
         greedy = np.random.rand() > self.eps
         if greedy:
@@ -394,8 +395,9 @@ class SRDyna():
         ax.set_axis_off()
 
     def render_sr(self, s, ax, cmap='plasma', alpha=1.0):
+        H = self.corrected_value_map(self.H)
         sa_idx = self.state_action_index(s, 0)
-        state_sr = self.H[sa_idx:sa_idx+4].sum(axis=0)[:self.n_viz_sas()].reshape(-1, 4).max(axis=1)
+        state_sr = H[sa_idx:sa_idx+4].sum(axis=0)[:self.n_viz_sas()].reshape(-1, 4).max(axis=1)
         ax.imshow(state_sr.reshape(self.env.h, self.env.w), origin='bottom', alpha=alpha, cmap=cmap)
         loc = self.env.loc_at_state(s)
         ax.set_title("SR(%d, %d)" % (loc[0], loc[1]))
