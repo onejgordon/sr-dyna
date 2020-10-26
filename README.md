@@ -2,9 +2,9 @@
 
 A Python/numpy implementation of SR-Dyna from [1] by Russek, Momennejad, Botvinick, Gershman and Daw, 2017.
 
-The [Matlab code](https://github.com/evanrussek/Predictive-Representations-PLOS-CB-2017/blob/master/agents/model_SRDYNA.m) shared with their paper was used for reference to fill in gaps when not fully specified.
+Russek's [Matlab code](https://github.com/evanrussek/Predictive-Representations-PLOS-CB-2017/blob/master/agents/model_SRDYNA.m) and Momennejad's [Python tutorials](https://github.com/idamomen/predictive_representations) were used for reference to fill in gaps when not fully specified.
 
-![Screenshot from Detour Task](out/detour_ss.png)
+![Anim from Revaluation Task](out/revaluate.gif)
 
 ## Usage
 

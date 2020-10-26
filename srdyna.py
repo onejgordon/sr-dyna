@@ -2,9 +2,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib import patches
 import matplotlib.animation as manimation
-from mpl_toolkits.axes_grid1 import make_axes_locatable
 import random
-from scipy.stats import expon
 
 
 class SimpleGridWorld():
@@ -13,18 +11,16 @@ class SimpleGridWorld():
     UP = 2
     DOWN = 3
 
-    ACTIONS = ["L", "R", "U", "D"]
+    ACTION_LABELS = ["L", "R", "U", "D"]
 
-    def __init__(self, w=5, h=5, world='worlds/latent_learning.txt'):
+    def __init__(self, w=5, h=5, max_reward_locs=1, world='worlds/latent_learning.txt'):
+        self.max_reward_locs = max_reward_locs
         self.load_world(world)
         self.map = self.get_map()
-        self.reward_locs = {}  # loc -> reward
-        self.terminal_state = self.w * self.h  # Last index
+        self.reward_locs = {}  # loc -> {reward, index}
+        self.terminal_state = self.n_states() - 1  # Last index
 
         self.actions = [self.LEFT, self.RIGHT, self.UP, self.DOWN]
-
-        # Stats
-        self.visits = np.zeros((self.h, self.w))
 
     def load_world(self, fn):
         self.wall_coords = []
@@ -37,7 +33,12 @@ class SimpleGridWorld():
                         self.wall_coords.append((x, y))
                 y += 1
         self.h = y
-        print("Loaded %dx%d world" % (self.w, self.h))
+        print("Loaded %dx%d world with %d states" % (self.w, self.h, self.n_states()))
+
+    def add_reward(self, loc, amount=10):
+        new_idx = len(self.reward_locs)
+        s = self.count_cells() + new_idx
+        self.reward_locs[loc] = {'reward': amount, 'index': new_idx, 's': s}
 
     def wall_at(self, loc):
         return self.map[loc[1], loc[0]] == 1
@@ -49,36 +50,49 @@ class SimpleGridWorld():
                 m[mc[1], mc[0]] = 1
         return m
 
-    def visits_to(self, loc):
-        return self.visits[loc[1], loc[0]]
-
-    def state_at_loc(self, loc):
-        x, y = loc
-        return self.w * y + x
+    def state_at_loc(self, loc, ignore_reward=False):
+        if not ignore_reward and self.reward_loc(loc):
+            ro = self.reward_locs.get(loc)
+            s = ro.get('s')
+        else:
+            x, y = loc
+            s = self.w * y + x
+        return s
 
     def loc_at_state(self, s):
         x = int(s % self.w)
         y = int(s / self.w)
         return (x, y)
 
-    def at_reward(self, s):
-        loc = self.loc_at_state(s)
+    def reward_state(self, s):
+        # TODO: Efficiency
+        cells = self.count_cells()
+        is_reward_state = s in range(cells, cells+self.max_reward_locs)
+        if is_reward_state:
+            for loc, ro in self.reward_locs.items():
+                if ro.get('s') == s:
+                    return ro.get('reward')
+        return 0
+
+    def reward_loc(self, loc):
         return loc in self.reward_locs.keys()
 
     def n_states(self):
-        return self.count_cells() + 1
+        return self.count_cells() + self.max_reward_locs + 1
 
     def count_cells(self):
         return self.w * self.h
 
     def available_actions(self, s):
-        if self.at_reward(s):
-            return [0]  # Dummy action from reward state
+        if s >= self.count_cells():
+            available = [0]
         else:
-            return self.actions
+            available = self.actions
+        return available
 
     def random_action(self, s):
-        return random.choice(self.available_actions(s))
+        aa = self.available_actions(s)
+        return random.choice(aa)
 
     def successor(self, s, a):
         delta = {
@@ -90,10 +104,9 @@ class SimpleGridWorld():
         done = False
         reward = 0
         loc = self.loc_at_state(s)
-        at_reward = self.at_reward(s)
-        if at_reward:
+        reward = self.reward_state(s)
+        if reward:
             next_s = self.terminal_state
-            reward = self.reward_locs.get(loc)
             done = True
         else:
             next_loc = (loc[0] + delta[0], loc[1] + delta[1])
@@ -121,14 +134,11 @@ class SimpleGridWorld():
     def dim(self):
         return self.get_space().size
 
-    def render(self, a, ax=None, with_visits=False, last_agent_state=False, last_k_steps=0):
+    def render(self, a, ax=None, last_agent_state=True, last_k_steps=0):
         if ax is None:
             fig, ax = plt.subplots()
         m = self.get_map()
         ax.imshow(m, origin='bottom')
-        if with_visits:
-            visit_img = self.visits / self.visits.sum()
-            ax.imshow(visit_img, origin='bottom', cmap='plasma', alpha=0.7)
         if a.last_state is not None:
             last_loc = self.loc_at_state(a.last_state)
             render_loc = last_loc if last_agent_state else self.loc_at_state(a.state)
@@ -138,7 +148,7 @@ class SimpleGridWorld():
             reward = patches.Circle(loc, radius=0.5, fill=True, color='green')
             ax.add_patch(reward)
         if last_k_steps:
-            for t, s, action, s_n in a.replay_buffer[-last_k_steps:]:
+            for t, s, action, s_n, _ in a.replay_buffer[-last_k_steps:]:
                 age = a.t - t
                 loc = self.loc_at_state(s)
                 a_step = patches.Circle(loc, radius=0.2, fill=True, color='white', alpha=1. - (age/last_k_steps))
@@ -150,35 +160,36 @@ class SimpleGridWorld():
 
 class SRDyna():
 
-    def __init__(self, id, env, d_action=8, loc=(0, 0), params={}):
+    def __init__(self, id, env, loc=(0, 0), **params):
         self.id = id
         self.t = 0
         self.ep_t = 0
         self.start_loc = loc
         self.env = env
-        self.n_actions = len(env.ACTIONS)
-        self.d_action = d_action
+        self.n_actions = len(env.actions)
         self.action = None
         self.last_state = None
         self.last_action = None
         self.last_reward = None
 
-        n_states = self.env.n_states()
-        n_state_actions = n_states * self.n_actions
+        n_state_actions = self.env.count_cells() * self.n_actions \
+            + env.max_reward_locs + 1  # 1 for terminal
 
         # Params
         self.alpha_sr = 0.3
-        self.alpha_td = 0.3
+        self.alpha_w = params.get('alpha_w', 0.3)
         self.gamma = 0.95
         self.eps = 0.1
+        self.post_step_replays = params.get('post_step_replays', 10)
+        self.exp_lambda = params.get('exp_lambda', 1./5)
 
         # Model
         self.H = params.get('H', np.eye(n_state_actions, n_state_actions))  # H(s, a) -> Expected discounted state-action occupancy
-        self.H[-4:, -4:] = 0  # Terminal states zero'd
+        self.H[-1, -1] = 0  # Terminal state zero'd
         self.W = np.zeros(n_state_actions)  # Value function weights (w(sa) -> E_a[R(s, a)])
 
         # Memory
-        self.replay_buffer = np.array([], dtype=(int, 4))  # Append to end
+        self.replay_buffer = np.array([], dtype=(int, 5))  # Append to end
 
         # self.Particle = recordclass('Particle', 'loc last_loc energy')  # loc as Node ID
 
@@ -194,25 +205,34 @@ class SRDyna():
         self.last_state = None
         self.last_action = None
         self.last_reward = None
-        self.action = None
+        self.action = self.eps_greedy_policy(self.state)
         self.ep_t = 0
 
     def n_states(self):
         return self.env.count_cells()
 
+    def n_viz_sas(self):
+        return self.env.count_cells() * self.n_actions
+
     def state_action_index(self, s, a):
         """
         Index into S x A size array for H
         """
-        return s * self.n_actions + a
+        cells = self.env.count_cells()
+        if s < cells:
+            return s * self.n_actions + a
+        else:
+            return cells * self.n_actions + (s - cells)
 
     def v_pi(self):
         """
-        For SR-Dyna, which worked with action values rather than state values,
-        the state value function was computed as the max action value available in that state.
+        From paper: 'For SR-Dyna, which worked with action values rather than state values,
+        the state value function was computed as the max action value available
+        in that state.'
         """
-        vs = np.matmul(self.H, self.W.reshape(-1, 1))  # 400 x 1
-        vs = vs.reshape(-1, 4)
+        vs = np.matmul(self.H, self.W.reshape(-1, 1))  # 40x x 1
+        vs = self.corrected_value_map(vs)
+        vs = vs[:self.n_viz_sas()].reshape(-1, 4)
         values = vs.max(axis=1)
         return values
 
@@ -220,41 +240,22 @@ class SRDyna():
         sa_index = self.state_action_index(s, a)
         return (self.H[sa_index] * self.W).sum()
 
-    def random_experience_sa(self):
+    def random_experience_sas(self, k=1):
         """
         Choose an experience sample uniformly at random (from unique
         experience list), and return it's s, a
         """
         unique_sas = np.unique(self.replay_buffer[:, 1:3], axis=0)
-        idx = np.random.randint(len(unique_sas))
-        exp = unique_sas[idx]
-        s, a = exp
-        return (s, a)
-
-    def weighted_experience_samples(self, k=10, exp_lambda=1/5., from_sa=None):
-        experiences = self.replay_buffer.copy()
-        if from_sa is not None:
-            # Filter to only experiences from s, a
-            s, a = from_sa
-            exp_rows = (experiences[:, 1] == s) & (experiences[:, 2] == a)
-            experiences = experiences[exp_rows]
-        exp = expon(scale=1/exp_lambda)
-        delays = np.arange(len(experiences), 0, -1)  # Recenty weighting
-        if len(experiences) > 5:
-            weights = exp.pdf(delays)
-            weights = weights / weights.sum()
-            if np.isnan(np.sum(weights)):
-                print("NaNs in delays: %s, from sa: %s" % (delays, from_sa))
-                weights = None
-        else:
-            weights = None
-        ids = np.random.choice(len(experiences), size=k, replace=True, p=weights)
-        return experiences[ids]
+        idxs = np.random.choice(len(unique_sas), size=k, replace=True)
+        exps = unique_sas[idxs]
+        return exps
 
     def tiebreak_argmax(self, vals):
         return np.random.choice(np.flatnonzero(vals == vals.max()))
 
     def eps_greedy_policy(self, s, verbose=False):
+        if self.env.reward_state(s) or s == self.env.terminal_state:
+            return 0
         greedy = np.random.rand() > self.eps
         if greedy:
             sa_index = self.state_action_index(s, 0)
@@ -266,18 +267,44 @@ class SRDyna():
             action = self.env.random_action(s)
         return action
 
-    def learn_offline(self, k=10, samples=None):
+    def weighted_experience_samples(self, k=10):
+        """
+        Draw k samples from all unique (s, a)s, for each select a single
+        transition from filtered buffer via exponential distribution (recency
+        weighted).
+        """
+        experiences = self.replay_buffer
+        random_sas = self.random_experience_sas(k=k)
+        sample_ids = np.random.exponential(scale=1/self.exp_lambda, size=len(random_sas)).astype(int)
+        experience_samples = []
+        for sampled_id, from_sa in zip(sample_ids, random_sas):
+            s, a = from_sa
+            # Filter to only experiences from s, a
+            exp_rows = (experiences[:, 1] == s) & (experiences[:, 2] == a)
+            experiences_from_sa = experiences[exp_rows]
+            n_exps = len(experiences_from_sa)
+            # Recency weighting via sampled_id (Exponential over indexes)
+            sampled_id = n_exps - np.clip(sampled_id, a_min=1, a_max=n_exps)
+            experience_samples.append(experiences_from_sa[sampled_id])
+        return np.array(experience_samples)
+
+    def learn_offline(self, k=10):
         """
         Replay k transition samples (recency weighted) as per Eq 18
         """
-        if samples is None:
-            samples = self.weighted_experience_samples(k=k)
+        if not k:
+            return
+        samples = self.weighted_experience_samples(k=k)
         # Update state-action SR
-        for t, s, a, s_next in samples:
-            sa_prime_index = self.state_action_index(s_next, 0)
+        for t, s, a, s_prime, a_prime in samples:
+            sa_prime_index = self.state_action_index(s_prime, 0)
             qs = (self.H[sa_prime_index:sa_prime_index+4] * self.W).sum(axis=1)
-            a_star = self.tiebreak_argmax(qs)
-            sa_star_idx = self.state_action_index(s_next, a_star)
+            if (qs == qs.max()).sum() > 1:
+                # Ties, use a_prime (see https://github.com/evanrussek/Predictive-Representations-PLOS-CB-2017/blob/fb83671377d8ea0959fa421ef13f8f56d9dd65b2/agents/model_SRDYNA.m#L97)
+                a_star = a_prime
+            else:
+                a_star = self.tiebreak_argmax(qs)
+            sa_star_idx = self.state_action_index(s_prime, a_star)
             sa_idx = self.state_action_index(s, a)
             one_hot_sa = np.zeros(self.H.shape[0])
             one_hot_sa[sa_idx] = 1
@@ -293,15 +320,14 @@ class SRDyna():
         sa_idx = self.state_action_index(s, a)
         sa_prime_idx = self.state_action_index(s_prime, a_prime)
         one_hot_sa = np.zeros(self.H.shape[0])
-        one_hot_sa[sa_idx] = 1  # Note: Different from paper (which uses 1(sa))
+        one_hot_sa[sa_idx] = 1
         self.H[sa_idx] += self.alpha_sr * (one_hot_sa + self.gamma * self.H[sa_prime_idx] - self.H[sa_idx])
 
-        # Update value weights (W) from TD rule
+        # Update value weights (W) from TD rule (Eq. 15)
         delta = r + self.gamma * self.q_pi(s_prime, a_prime) - self.q_pi(s, a)
-        # Eq. 15 (Note: different indexing than equation from paper)
         feature_rep = self.H[sa_idx]
         norm_feature_rep = feature_rep / (feature_rep ** 2).sum()
-        w_update = self.alpha_td * delta * norm_feature_rep
+        w_update = self.alpha_w * delta * norm_feature_rep
         self.W += w_update
 
     def step(self, random_policy=False, verbose=False, learning=True):
@@ -314,9 +340,7 @@ class SRDyna():
         if self.action is None:
             self.action = self.env.random_action(self.state)
         s_prime, r, done = self.env.successor(self.state, self.action)
-        if self.env.at_reward(s_prime):
-            a_prime = 0  # Dummy action (TODO cleanup)
-        elif random_policy:
+        if random_policy:
             a_prime = self.env.random_action(s_prime)
         else:
             a_prime = self.eps_greedy_policy(s_prime, verbose=verbose)
@@ -324,59 +348,77 @@ class SRDyna():
             self.learn(self.state, self.action, r, s_prime, a_prime, verbose=verbose)
         if verbose:
             print("%s -> a:%d -> %s (r=%d)" % (self.state, self.action, s_prime, r))
-        if done:
-            self.terminate_episode()
-        else:
-            # Add to buffer
-            self.replay_buffer = np.append(self.replay_buffer, [(self.t, self.state, self.action, s_prime)], axis=0)
+        # Add to buffer
+        exp = (self.t, self.state, self.action, s_prime, a_prime)
+        self.replay_buffer = np.append(self.replay_buffer, [exp], axis=0)
         if learning:
-            self.learn_offline()  # 10 replay steps after each step
+            self.learn_offline(k=self.post_step_replays)  # 10 replay steps after each step
         self.last_state = self.state
         self.last_action = self.action
         self.state = s_prime
         self.action = a_prime
         self.t += 1
         self.ep_t += 1
+        if done:
+            self.terminate_episode()
         return done
 
+    def corrected_value_map(self, mat_):
+        """
+        Reconstruct matrix swapping in single-action reward states
+        for correct rendering.
+        """
+        mat = mat_.copy()
+        for loc, ro in self.env.reward_locs.items():
+            s = ro.get('s')
+            sa = self.state_action_index(self.env.state_at_loc(loc, ignore_reward=True), 0)
+            sa_goal = self.state_action_index(s, 0)
+            mat[sa:sa+4] = mat[sa_goal]
+        return mat
+
     def render_state_values(self, ax, fig=None, vmax=None):
-        values = self.v_pi()[:-1]  # Clip terminal state
-        img = ax.imshow(values.reshape(self.env.h, self.env.w),
-                        origin='bottom',
-                        cmap='Greys_r', vmin=0, vmax=vmax)
+        values = self.v_pi()
+        ax.imshow(values.reshape(self.env.h, self.env.w),
+                  origin='bottom',
+                  cmap='Greys_r', vmin=0, vmax=vmax)
         ax.set_title("$V_{\\pi}$")
         ax.set_axis_off()
-        # if fig:
-        #     divider = make_axes_locatable(ax)
-        #     cax = divider.append_axes("right", size="5%", pad=0.05)
-        #     fig.colorbar(img, ax=ax, cax=cax)
 
-    def render_W(self, ax, fig=None, vmax=20):
-        state_weights = self.W.reshape(-1, 4)[:-1, :].max(axis=1)
-        img = ax.imshow(state_weights.reshape(self.env.h, self.env.w),
-                        origin='bottom',
-                        cmap='Greys_r', vmin=0, vmax=vmax)
-        ax.set_title("W")
+    def render_W(self, ax, fig=None, vmax=None):
+        W = self.corrected_value_map(self.W)
+        state_weights = W[:self.n_viz_sas()].reshape(-1, 4).max(axis=1)
+        ax.imshow(state_weights.reshape(self.env.h, self.env.w),
+                  origin='bottom',
+                  cmap='Greys_r', vmin=0, vmax=vmax)
+        ax.set_title("W (%.2f-%.2f)" % (state_weights.min(), state_weights.max()))
         ax.set_axis_off()
-        # if fig:
-        #     divider = make_axes_locatable(ax)
-        #     cax = divider.append_axes("right", size="5%", pad=0.05)
-        #     fig.colorbar(img, ax=ax, cax=cax)
 
     def render_sr(self, s, ax, cmap='plasma', alpha=1.0):
         sa_idx = self.state_action_index(s, 0)
-        state_sr = self.H[sa_idx:sa_idx+4].sum(axis=0).reshape(-1, 4)[:-1, :].max(axis=1)
+        state_sr = self.H[sa_idx:sa_idx+4].sum(axis=0)[:self.n_viz_sas()].reshape(-1, 4).max(axis=1)
         ax.imshow(state_sr.reshape(self.env.h, self.env.w), origin='bottom', alpha=alpha, cmap=cmap)
         loc = self.env.loc_at_state(s)
         ax.set_title("SR(%d, %d)" % (loc[0], loc[1]))
         ax.set_axis_off()
 
+    def make_plots(self, sr_state=None):
+        if sr_state is None:
+            sr_state = self.state
+        fig, axs = plt.subplots(1, 4, dpi=144)
+        self.env.render(self, ax=axs[0], last_k_steps=self.ep_t)
+        self.render_state_values(ax=axs[1], fig=fig)
+        self.render_W(ax=axs[2], fig=fig)
+        self.render_sr(sr_state, ax=axs[3])
+        plt.show()
+
     def record_trials(self, title="recorded_trials", n_trial_per_loc=1,
-                      start_locs=None, max_steps=100):
+                      start_locs=None, learning=False, max_steps=100):
         metadata = dict(title=title, artist='JG')
         writer = manimation.FFMpegFileWriter(fps=15, metadata=metadata)
         fig, axs = plt.subplots(1, 4, figsize=(7, 3))
         fig.tight_layout()
+
+        self.eps = 0  # Fully greedy for recording
 
         with writer.saving(fig, "./out/%s.mp4" % title, 144):
             for sl in start_locs:
@@ -385,7 +427,7 @@ class SRDyna():
                     done = False
                     steps = 0
                     while not done and steps < max_steps:
-                        done = self.step(learning=False)
+                        done = self.step(learning=learning)
                         self.env.render(self, ax=axs[0], last_k_steps=self.ep_t)
                         self.render_state_values(ax=axs[1], fig=fig)
                         self.render_W(ax=axs[2], fig=fig)
